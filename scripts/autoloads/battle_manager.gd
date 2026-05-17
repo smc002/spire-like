@@ -2,6 +2,12 @@ extends Node
 
 const HAND_MAX: int = 10
 
+# Pacing for enemy turn (read by tests; UI catches the events as they fire)
+const ENEMY_INTENT_PAUSE: float = 0.35
+const ENEMY_HIT_GAP: float = 0.18
+const ENEMY_ACTION_GAP: float = 0.20
+const ENEMY_BETWEEN_GAP: float = 0.22
+
 var player: Player
 var enemies: Array[Enemy] = []
 var rng: RandomNumberGenerator
@@ -23,7 +29,6 @@ func start_battle(p_player: Player, encounter: Encounter, seed: int = 0) -> void
 	else:
 		rng.randomize()
 
-	# Clean up previous enemies if any
 	for e in enemies:
 		if is_instance_valid(e):
 			e.queue_free()
@@ -66,7 +71,6 @@ func end_player_turn() -> void:
 	is_player_turn = false
 	BattleEvents.turn_ended.emit(player)
 
-	# Discard non-retained hand
 	var retained: Array[Card] = []
 	for c in player.hand:
 		if c.retain:
@@ -79,7 +83,7 @@ func end_player_turn() -> void:
 	player.status_holder.decay_turn_end()
 	player.block = 0
 
-	_enemy_turn()
+	await _enemy_turn()
 
 
 func _enemy_turn() -> void:
@@ -87,20 +91,18 @@ func _enemy_turn() -> void:
 		if e.is_dead():
 			continue
 		BattleEvents.turn_started.emit(e)
-		_execute_move(e, e.next_move)
+		await get_tree().create_timer(ENEMY_INTENT_PAUSE).timeout
+		await _execute_move(e, e.next_move)
 		e.move_history.append(e.next_move)
 		BattleEvents.turn_ended.emit(e)
 		e.status_holder.decay_turn_end()
 		e.block = 0
 		if not battle_active:
 			return
-
-	# Roll next intents for survivors
-	for e in enemies:
-		if e.is_dead():
-			continue
+		# Roll next intent immediately so UI shows the new intent during the gap
 		e.roll_next_move(rng)
 		BattleEvents.enemy_intent_changed.emit(e, e.next_move)
+		await get_tree().create_timer(ENEMY_BETWEEN_GAP).timeout
 
 	if battle_active:
 		_start_player_turn()
@@ -112,17 +114,20 @@ func _execute_move(enemy: Enemy, move: EnemyMove) -> void:
 			if player.is_dead():
 				break
 			deal_damage(enemy, player, move.damage, true)
+			await get_tree().create_timer(ENEMY_HIT_GAP).timeout
 	if move.block > 0:
 		add_block(enemy, move.block)
+		await get_tree().create_timer(ENEMY_ACTION_GAP).timeout
 	if move.status_to_apply != &"":
 		var target: Actor = player
 		if move.intent == EnemyMove.Intent.BUFF:
 			target = enemy
 		apply_status(enemy, target, move.status_to_apply, move.status_stacks)
+		await get_tree().create_timer(ENEMY_ACTION_GAP).timeout
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Card play
+# Card play (player-driven, synchronous)
 # ──────────────────────────────────────────────────────────────────────────────
 
 func play_card(card: Card, targets: Array[Actor]) -> bool:
@@ -136,7 +141,7 @@ func play_card(card: Card, targets: Array[Actor]) -> bool:
 		return false
 
 	var cost: int = card.cost
-	if cost == -1:   # X-cost
+	if cost == -1:
 		cost = player.energy
 	player.energy -= cost
 
@@ -163,7 +168,7 @@ func play_card(card: Card, targets: Array[Actor]) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Damage / block / status (called by effects + AI)
+# Damage / block / status / draw (called by effects + AI)
 # ──────────────────────────────────────────────────────────────────────────────
 
 func deal_damage(source: Actor, target: Actor, amount: int, is_attack: bool) -> void:
@@ -216,7 +221,7 @@ func draw_cards(count: int) -> void:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Queries
+# Queries / end of battle
 # ──────────────────────────────────────────────────────────────────────────────
 
 func living_enemies() -> Array[Enemy]:
@@ -240,7 +245,6 @@ func _check_battle_end() -> void:
 		BattleEvents.battle_won.emit()
 
 
-# External force-end for safety nets (e.g. AutoBattler turn cap)
 func force_end_battle(won: bool) -> void:
 	if not battle_active:
 		return
@@ -252,13 +256,10 @@ func force_end_battle(won: bool) -> void:
 		BattleEvents.battle_lost.emit()
 
 
-# Wipe per-battle state so the player/enemies can be discarded cleanly and
-# the next battle starts fresh (no stale status behaviors on player).
 func _cleanup_battle() -> void:
 	if player and player.status_holder:
 		player.status_holder.clear_all()
 		player.block = 0
 	for e in enemies:
-		if is_instance_valid(e):
-			if e.status_holder:
-				e.status_holder.clear_all()
+		if is_instance_valid(e) and e.status_holder:
+			e.status_holder.clear_all()

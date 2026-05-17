@@ -7,7 +7,9 @@ class_name CardView extends Panel
 # positioned absolutely.
 #
 # Hover: scale 1.08 + lift 20px upward via Tween while in IDLE state.
-# Drag: top_level + z_index 100, follows cursor, snaps back on cancel.
+# Drag: top_level + z_index 100, follows cursor. On release, parent decides
+#       to play it (BattleScene calls play animation) or cancel (it tweens
+#       back via cancel_drag).
 
 
 signal drag_started(card_view: CardView)
@@ -19,6 +21,9 @@ const CARD_H: int = 180
 const HOVER_SCALE: Vector2 = Vector2(1.08, 1.08)
 const HOVER_LIFT: float = 20.0
 const HOVER_TIME: float = 0.12
+const SLOT_GLIDE_TIME: float = 0.16
+const CANCEL_TIME: float = 0.18
+const SLIDE_IN_TIME: float = 0.28
 
 enum State { IDLE, DRAG }
 
@@ -35,6 +40,7 @@ var _desc_label: Label
 var _type_label: Label
 var _style: StyleBoxFlat
 var _hover_tween: Tween
+var _slot_tween: Tween
 
 
 func setup(p_card: Card) -> void:
@@ -42,17 +48,49 @@ func setup(p_card: Card) -> void:
 	custom_minimum_size = Vector2(CARD_W, CARD_H)
 	size = Vector2(CARD_W, CARD_H)
 	mouse_filter = Control.MOUSE_FILTER_STOP
-	# Pivot at bottom-center so hover lift + scale looks like the card grows up
 	pivot_offset = Vector2(CARD_W / 2.0, CARD_H)
 	_build()
 	_paint()
 
 
-# Caller sets both visual position and the rest target in one call so hover
-# tweens always restore to the correct slot.
+# Sets visual position AND the rest target (used by hover / cancel).
 func snap_to_slot(pos: Vector2) -> void:
 	_slot_position = pos
 	position = pos
+
+
+# Animated reposition to a new slot (used when hand size changes).
+func glide_to_slot(new_slot: Vector2) -> void:
+	if _state == State.DRAG:
+		_slot_position = new_slot
+		return
+	_slot_position = new_slot
+	_kill_slot_tween()
+	if position.is_equal_approx(new_slot):
+		return
+	_slot_tween = create_tween()
+	_slot_tween.tween_property(self, "position", new_slot, SLOT_GLIDE_TIME).set_trans(Tween.TRANS_QUAD)
+
+
+# Slide in from `start_pos`, used for newly-drawn cards.
+func slide_in_from(start_pos: Vector2, slot_pos: Vector2) -> void:
+	_slot_position = slot_pos
+	position = start_pos
+	scale = Vector2(0.55, 0.55)
+	modulate.a = 0.5
+	_kill_slot_tween()
+	_slot_tween = create_tween().set_parallel(true)
+	_slot_tween.tween_property(self, "position", slot_pos, SLIDE_IN_TIME).set_trans(Tween.TRANS_QUAD)
+	_slot_tween.tween_property(self, "scale", Vector2.ONE, SLIDE_IN_TIME)
+	_slot_tween.tween_property(self, "modulate:a", 1.0, SLIDE_IN_TIME)
+
+
+# Tween the card back to its slot (used when drag is released invalidly).
+func cancel_drag() -> void:
+	_kill_slot_tween()
+	_slot_tween = create_tween().set_parallel(true)
+	_slot_tween.tween_property(self, "position", _slot_position, CANCEL_TIME).set_trans(Tween.TRANS_QUAD)
+	_slot_tween.tween_property(self, "scale", Vector2.ONE, CANCEL_TIME)
 
 
 func _ready() -> void:
@@ -61,7 +99,7 @@ func _ready() -> void:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Build (absolute layout — Panel is a plain Control with a stylebox)
+# Build (Panel + absolute layout)
 # ─────────────────────────────────────────────────────────────────────
 
 func _build() -> void:
@@ -152,7 +190,7 @@ func set_playable(value: bool) -> void:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Hover affordance
+# Hover
 # ─────────────────────────────────────────────────────────────────────
 
 func _on_mouse_entered() -> void:
@@ -160,16 +198,16 @@ func _on_mouse_entered() -> void:
 		return
 	if not playable:
 		return
-	_tween_to(_slot_position + Vector2(0, -HOVER_LIFT), HOVER_SCALE)
+	_tween_hover(_slot_position + Vector2(0, -HOVER_LIFT), HOVER_SCALE)
 
 
 func _on_mouse_exited() -> void:
 	if _state != State.IDLE:
 		return
-	_tween_to(_slot_position, Vector2.ONE)
+	_tween_hover(_slot_position, Vector2.ONE)
 
 
-func _tween_to(target_pos: Vector2, target_scale: Vector2) -> void:
+func _tween_hover(target_pos: Vector2, target_scale: Vector2) -> void:
 	if _hover_tween:
 		_hover_tween.kill()
 	_hover_tween = create_tween().set_parallel(true)
@@ -178,7 +216,7 @@ func _tween_to(target_pos: Vector2, target_scale: Vector2) -> void:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Drag state machine
+# Drag
 # ─────────────────────────────────────────────────────────────────────
 
 func _gui_input(event: InputEvent) -> void:
@@ -208,10 +246,10 @@ func _input(event: InputEvent) -> void:
 
 
 func _start_drag(click_global_pos: Vector2) -> void:
-	# Cancel hover so the card snaps to its slot before going top-level
 	if _hover_tween:
 		_hover_tween.kill()
 		_hover_tween = null
+	_kill_slot_tween()
 	scale = Vector2.ONE
 	position = _slot_position
 
@@ -220,17 +258,29 @@ func _start_drag(click_global_pos: Vector2) -> void:
 	top_level = true
 	z_index = 100
 	_drag_offset = click_global_pos - cur_global
-	position = cur_global   # now in viewport coords
+	position = cur_global
 	drag_started.emit(self)
 
 
 func _end_drag(release_global_pos: Vector2) -> void:
 	_state = State.IDLE
+	# Convert viewport position back to parent-local so the parent can
+	# either tween us home (cancel) or fly us to a pile (play).
+	var parent_global := Vector2.ZERO
+	if get_parent() and get_parent() is Control:
+		parent_global = (get_parent() as Control).global_position
+	var local_now := position - parent_global
 	top_level = false
 	z_index = 0
-	position = _slot_position
+	position = local_now
 	scale = Vector2.ONE
 	drag_released.emit(self, release_global_pos)
+
+
+func _kill_slot_tween() -> void:
+	if _slot_tween:
+		_slot_tween.kill()
+		_slot_tween = null
 
 
 func is_dragging() -> bool:
