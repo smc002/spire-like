@@ -1,8 +1,14 @@
 extends Control
 
-# Human-playable battle UI. Drag a playable card and release:
+# Human-playable battle UI.
+# Drag a playable card and release:
 #   • target card → release over an enemy to play on it; elsewhere cancels
 #   • no-target card → release above the hand row to play; otherwise cancels
+#
+# Drag-time affordances:
+#   • Card hover: scale + lift in CardView
+#   • Damage preview: enemies show "-N" when an attack card is dragged over
+#   • Drop-zone hint: faint band above hand for self/AOE cards
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -16,6 +22,7 @@ var _enemy_container: HBoxContainer
 var _player_panel: PanelContainer
 var _player_label: Label
 var _hand_root: Control
+var _drop_zone_hint: ColorRect
 var _pile_label: Label
 var _end_turn_btn: Button
 var _result_panel: PanelContainer
@@ -112,7 +119,16 @@ func _build_ui() -> void:
 	_player_panel.add_child(_player_label)
 	add_child(_player_panel)
 
-	# Hand uses absolute positioning so we can drag children freely.
+	# Drop-zone hint banner — shown while dragging a self/AOE card
+	_drop_zone_hint = ColorRect.new()
+	_drop_zone_hint.position = Vector2(HAND_AREA_X, HAND_AREA_Y - 40)
+	_drop_zone_hint.size = Vector2(HAND_AREA_W, 40)
+	_drop_zone_hint.color = Color(0.6, 0.85, 0.4, 0.20)
+	_drop_zone_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_drop_zone_hint.visible = false
+	add_child(_drop_zone_hint)
+
+	# Hand uses absolute positioning so cards can be dragged freely.
 	_hand_root = Control.new()
 	_hand_root.position = Vector2(HAND_AREA_X, HAND_AREA_Y)
 	_hand_root.size = Vector2(HAND_AREA_W, HAND_AREA_H)
@@ -273,16 +289,21 @@ func _on_enemy_intent_changed(_enemy: Enemy, _move: EnemyMove) -> void:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Drag handlers
+# Drag handlers + per-frame damage preview
 # ─────────────────────────────────────────────────────────────────────
 
 func _on_card_drag_started(cv: CardView) -> void:
 	_dragging_card = cv
 	_end_turn_btn.disabled = true
+	# Show drop-zone hint for self/AOE cards
+	if not cv.card.requires_target():
+		_drop_zone_hint.visible = true
 
 
 func _on_card_drag_released(cv: CardView, release_global_pos: Vector2) -> void:
 	_dragging_card = null
+	_drop_zone_hint.visible = false
+	_clear_all_damage_previews()
 	_end_turn_btn.disabled = not BattleManager.is_player_turn
 
 	if not BattleManager.is_player_turn or not BattleManager.battle_active:
@@ -304,7 +325,6 @@ func _on_card_drag_released(cv: CardView, release_global_pos: Vector2) -> void:
 		if not played:
 			_set_log("Drop on an enemy to play %s" % card.display_name)
 	else:
-		# Above-hand area = "play zone" for self / AOE cards
 		if release_global_pos.y < HAND_AREA_Y:
 			var no_targets: Array[Actor] = []
 			played = BattleManager.play_card(card, no_targets)
@@ -314,6 +334,85 @@ func _on_card_drag_released(cv: CardView, release_global_pos: Vector2) -> void:
 				_set_log("Could not play %s" % card.display_name)
 		else:
 			_set_log("Drag above the hand to play %s" % card.display_name)
+
+
+func _process(_delta: float) -> void:
+	if _dragging_card == null or not is_instance_valid(_dragging_card):
+		return
+	var card := _dragging_card.card
+	if not _card_deals_damage(card):
+		return
+
+	var mouse_pos := get_global_mouse_position()
+	var hits_all := _card_hits_all(card)
+
+	# Find single hovered enemy (for target cards)
+	var hovered: EnemyView = null
+	if card.requires_target():
+		for ev in _enemy_views:
+			if not is_instance_valid(ev) or ev.enemy == null or ev.enemy.is_dead():
+				continue
+			if ev.get_global_rect().has_point(mouse_pos):
+				hovered = ev
+				break
+
+	for ev in _enemy_views:
+		if not is_instance_valid(ev) or ev.enemy == null or ev.enemy.is_dead():
+			continue
+		var should_preview: bool = false
+		if hits_all and mouse_pos.y < HAND_AREA_Y:
+			should_preview = true            # any-position preview for AOE
+		elif ev == hovered:
+			should_preview = true
+		if should_preview:
+			ev.show_damage_preview(_preview_card_damage(card, ev.enemy))
+		else:
+			ev.clear_damage_preview()
+
+
+func _clear_all_damage_previews() -> void:
+	for ev in _enemy_views:
+		if is_instance_valid(ev):
+			ev.clear_damage_preview()
+
+
+# Replicates the damage modifier chain (strength → weak → vulnerable → multi-hit)
+# without firing real events. Mirrors logic in:
+#   - strength_behavior.gd
+#   - weak_behavior.gd
+#   - vulnerable_behavior.gd
+func _preview_card_damage(card: Card, target: Enemy) -> int:
+	var total: int = 0
+	for eff in card.effects:
+		if eff is DealDamage:
+			var dd := eff as DealDamage
+			var per_hit: int = dd.amount
+			# Strength (additive)
+			per_hit += _player.status_holder.get_stacks(&"strength")
+			# Weak on source (×0.75)
+			if _player.status_holder.get_stacks(&"weak") > 0:
+				per_hit = int(floor(per_hit * 0.75))
+			# Vulnerable on target (×1.5)
+			if is_instance_valid(target) and target.status_holder \
+					and target.status_holder.get_stacks(&"vulnerable") > 0:
+				per_hit = int(floor(per_hit * 1.5))
+			per_hit = maxi(per_hit, 0)
+			total += per_hit * dd.times
+	return total
+
+
+func _card_deals_damage(card: Card) -> bool:
+	for eff in card.effects:
+		if eff is DealDamage:
+			return true
+	return false
+
+
+func _card_hits_all(card: Card) -> bool:
+	for eff in card.effects:
+		if eff is DealDamage and (eff as DealDamage).hits_all:
+			return true
+	return false
 
 
 func _on_end_turn_pressed() -> void:
@@ -365,8 +464,7 @@ func _build_enemy_views() -> void:
 
 func _refresh_hand() -> void:
 	if _dragging_card != null and is_instance_valid(_dragging_card):
-		# Don't rebuild while a card is mid-drag — would lose the state.
-		return
+		return   # don't rebuild while a card is mid-drag
 
 	for child in _hand_root.get_children():
 		child.queue_free()
@@ -381,19 +479,20 @@ func _refresh_hand() -> void:
 		_hand_root.add_child(cv)
 		cv.setup(card)
 		cv.set_playable(card.is_playable(BattleManager.player.energy))
-		cv.position = _hand_slot(i, n)
+		cv.snap_to_slot(_hand_slot(i, n))
 		cv.drag_started.connect(_on_card_drag_started)
 		cv.drag_released.connect(_on_card_drag_released)
 
 
 func _hand_slot(index: int, total: int) -> Vector2:
-	var card_w := CardView.CARD_W
-	var card_h := CardView.CARD_H
-	var total_w := total * card_w + max(0, total - 1) * HAND_CARD_GAP
-	var area_w := _hand_root.size.x
-	var start_x := (area_w - total_w) / 2.0
-	var y := (_hand_root.size.y - card_h) / 2.0
-	return Vector2(start_x + index * (card_w + HAND_CARD_GAP), y)
+	var card_w: int = CardView.CARD_W
+	var card_h: int = CardView.CARD_H
+	var total_w: int = total * card_w + maxi(0, total - 1) * HAND_CARD_GAP
+	var area_w: float = _hand_root.size.x
+	var area_h: float = _hand_root.size.y
+	var start_x: float = (area_w - float(total_w)) / 2.0
+	var y: float = (area_h - float(card_h)) / 2.0
+	return Vector2(start_x + float(index * (card_w + HAND_CARD_GAP)), y)
 
 
 func _update_player_label() -> void:
