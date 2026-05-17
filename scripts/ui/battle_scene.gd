@@ -1,13 +1,12 @@
 extends Control
 
-# Main human-playable battle UI.
-# Subscribes to BattleEvents, mirrors state into the UI.
-# Click a no-target card to play. Click a target card to select, then click
-# an enemy to confirm. Click the selected card again to cancel.
+# Human-playable battle UI. Drag a playable card and release:
+#   • target card → release over an enemy to play on it; elsewhere cancels
+#   • no-target card → release above the hand row to play; otherwise cancels
 
 
 # ─────────────────────────────────────────────────────────────────────
-# UI refs (built procedurally in _build_ui)
+# UI refs (built procedurally)
 # ─────────────────────────────────────────────────────────────────────
 
 var _bg: ColorRect
@@ -16,7 +15,7 @@ var _action_log: Label
 var _enemy_container: HBoxContainer
 var _player_panel: PanelContainer
 var _player_label: Label
-var _hand_container: HBoxContainer
+var _hand_root: Control
 var _pile_label: Label
 var _end_turn_btn: Button
 var _result_panel: PanelContainer
@@ -24,14 +23,24 @@ var _result_label: Label
 var _result_button: Button
 
 # ─────────────────────────────────────────────────────────────────────
+# Layout constants
+# ─────────────────────────────────────────────────────────────────────
+
+const HAND_AREA_X: int = 240
+const HAND_AREA_Y: int = 540
+const HAND_AREA_W: int = 800
+const HAND_AREA_H: int = 180
+const HAND_CARD_GAP: int = 8
+
+# ─────────────────────────────────────────────────────────────────────
 # State
 # ─────────────────────────────────────────────────────────────────────
 
 var _player: Player
 var _enemy_views: Array[EnemyView] = []
-var _selected_card: CardView = null
 var _connections: Array = []
 var _refresh_queued: bool = false
+var _dragging_card: CardView = null
 
 
 func _ready() -> void:
@@ -58,12 +67,14 @@ func _build_ui() -> void:
 	_bg.color = Color(0.06, 0.06, 0.10)
 	_bg.anchor_right = 1
 	_bg.anchor_bottom = 1
+	_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_bg)
 
 	_turn_label = Label.new()
 	_turn_label.position = Vector2(20, 12)
 	_turn_label.add_theme_font_size_override("font_size", 22)
 	_turn_label.text = "—"
+	_turn_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_turn_label)
 
 	_action_log = Label.new()
@@ -72,6 +83,7 @@ func _build_ui() -> void:
 	_action_log.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_action_log.add_theme_font_size_override("font_size", 14)
 	_action_log.add_theme_color_override("font_color", Color(0.75, 0.75, 0.85))
+	_action_log.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_action_log)
 
 	_enemy_container = HBoxContainer.new()
@@ -79,11 +91,13 @@ func _build_ui() -> void:
 	_enemy_container.size = Vector2(1280, 280)
 	_enemy_container.alignment = BoxContainer.ALIGNMENT_CENTER
 	_enemy_container.add_theme_constant_override("separation", 40)
+	_enemy_container.mouse_filter = Control.MOUSE_FILTER_PASS
 	add_child(_enemy_container)
 
 	_player_panel = PanelContainer.new()
 	_player_panel.position = Vector2(20, 380)
 	_player_panel.size = Vector2(200, 180)
+	_player_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var pstyle := StyleBoxFlat.new()
 	pstyle.bg_color = Color(0.15, 0.20, 0.30)
 	pstyle.set_corner_radius_all(8)
@@ -93,21 +107,23 @@ func _build_ui() -> void:
 	pstyle.content_margin_bottom = 12
 	_player_panel.add_theme_stylebox_override("panel", pstyle)
 	_player_label = Label.new()
+	_player_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_player_label.add_theme_font_size_override("font_size", 15)
 	_player_panel.add_child(_player_label)
 	add_child(_player_panel)
 
-	_hand_container = HBoxContainer.new()
-	_hand_container.position = Vector2(240, 540)
-	_hand_container.size = Vector2(800, 180)
-	_hand_container.alignment = BoxContainer.ALIGNMENT_CENTER
-	_hand_container.add_theme_constant_override("separation", 8)
-	add_child(_hand_container)
+	# Hand uses absolute positioning so we can drag children freely.
+	_hand_root = Control.new()
+	_hand_root.position = Vector2(HAND_AREA_X, HAND_AREA_Y)
+	_hand_root.size = Vector2(HAND_AREA_W, HAND_AREA_H)
+	_hand_root.mouse_filter = Control.MOUSE_FILTER_PASS
+	add_child(_hand_root)
 
 	_pile_label = Label.new()
 	_pile_label.position = Vector2(1060, 540)
 	_pile_label.size = Vector2(200, 80)
 	_pile_label.add_theme_font_size_override("font_size", 14)
+	_pile_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(_pile_label)
 
 	_end_turn_btn = Button.new()
@@ -257,46 +273,54 @@ func _on_enemy_intent_changed(_enemy: Enemy, _move: EnemyMove) -> void:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Card / enemy interaction
+# Drag handlers
 # ─────────────────────────────────────────────────────────────────────
 
-func _on_card_clicked(card_view: CardView) -> void:
-	if not BattleManager.is_player_turn:
+func _on_card_drag_started(cv: CardView) -> void:
+	_dragging_card = cv
+	_end_turn_btn.disabled = true
+
+
+func _on_card_drag_released(cv: CardView, release_global_pos: Vector2) -> void:
+	_dragging_card = null
+	_end_turn_btn.disabled = not BattleManager.is_player_turn
+
+	if not BattleManager.is_player_turn or not BattleManager.battle_active:
 		return
-	if not card_view.playable:
-		_set_log("Not enough energy")
-		return
-	var c := card_view.card
-	if c.requires_target():
-		if _selected_card == card_view:
-			_clear_selection()
-			_set_log("Cancelled")
-		else:
-			_set_selection(card_view)
-			_set_log("Select target")
+
+	var card := cv.card
+	var played := false
+
+	if card.requires_target():
+		for ev in _enemy_views:
+			if not is_instance_valid(ev) or ev.enemy == null or ev.enemy.is_dead():
+				continue
+			if ev.get_global_rect().has_point(release_global_pos):
+				var targets: Array[Actor] = [ev.enemy as Actor]
+				played = BattleManager.play_card(card, targets)
+				if played:
+					_set_log("Played %s on %s" % [card.display_name, ev.enemy.data.display_name])
+				break
+		if not played:
+			_set_log("Drop on an enemy to play %s" % card.display_name)
 	else:
-		_clear_selection()
-		BattleManager.play_card(c, [] as Array[Actor])
-
-
-func _on_enemy_clicked(enemy_view: EnemyView) -> void:
-	if not BattleManager.is_player_turn:
-		return
-	if _selected_card == null:
-		return
-	var e := enemy_view.enemy
-	if e.is_dead():
-		return
-	var targets: Array[Actor] = [e as Actor]
-	var c := _selected_card.card
-	_clear_selection()
-	BattleManager.play_card(c, targets)
+		# Above-hand area = "play zone" for self / AOE cards
+		if release_global_pos.y < HAND_AREA_Y:
+			var no_targets: Array[Actor] = []
+			played = BattleManager.play_card(card, no_targets)
+			if played:
+				_set_log("Played %s" % card.display_name)
+			else:
+				_set_log("Could not play %s" % card.display_name)
+		else:
+			_set_log("Drag above the hand to play %s" % card.display_name)
 
 
 func _on_end_turn_pressed() -> void:
 	if not BattleManager.is_player_turn:
 		return
-	_clear_selection()
+	if _dragging_card != null:
+		return
 	_end_turn_btn.disabled = true
 	BattleManager.end_player_turn()
 
@@ -304,19 +328,6 @@ func _on_end_turn_pressed() -> void:
 func _on_result_button_pressed() -> void:
 	_result_panel.visible = false
 	_start_new_run_battle()
-
-
-func _set_selection(cv: CardView) -> void:
-	if _selected_card and is_instance_valid(_selected_card):
-		_selected_card.set_selected(false)
-	_selected_card = cv
-	cv.set_selected(true)
-
-
-func _clear_selection() -> void:
-	if _selected_card and is_instance_valid(_selected_card):
-		_selected_card.set_selected(false)
-	_selected_card = null
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -349,31 +360,40 @@ func _build_enemy_views() -> void:
 		var ev := EnemyView.new()
 		_enemy_container.add_child(ev)
 		ev.setup(e)
-		ev.clicked.connect(_on_enemy_clicked)
 		_enemy_views.append(ev)
 
 
 func _refresh_hand() -> void:
-	# Preserve selection across rebuild by Card identity
-	var prev_selected_card: Card = null
-	if _selected_card and is_instance_valid(_selected_card):
-		prev_selected_card = _selected_card.card
+	if _dragging_card != null and is_instance_valid(_dragging_card):
+		# Don't rebuild while a card is mid-drag — would lose the state.
+		return
 
-	for child in _hand_container.get_children():
+	for child in _hand_root.get_children():
 		child.queue_free()
-	_selected_card = null
 
 	if BattleManager.player == null:
 		return
-	for card in BattleManager.player.hand:
+	var hand := BattleManager.player.hand
+	var n := hand.size()
+	for i in n:
+		var card: Card = hand[i]
 		var cv := CardView.new()
-		_hand_container.add_child(cv)
+		_hand_root.add_child(cv)
 		cv.setup(card)
 		cv.set_playable(card.is_playable(BattleManager.player.energy))
-		cv.clicked.connect(_on_card_clicked)
-		if card == prev_selected_card:
-			cv.set_selected(true)
-			_selected_card = cv
+		cv.position = _hand_slot(i, n)
+		cv.drag_started.connect(_on_card_drag_started)
+		cv.drag_released.connect(_on_card_drag_released)
+
+
+func _hand_slot(index: int, total: int) -> Vector2:
+	var card_w := CardView.CARD_W
+	var card_h := CardView.CARD_H
+	var total_w := total * card_w + max(0, total - 1) * HAND_CARD_GAP
+	var area_w := _hand_root.size.x
+	var start_x := (area_w - total_w) / 2.0
+	var y := (_hand_root.size.y - card_h) / 2.0
+	return Vector2(start_x + index * (card_w + HAND_CARD_GAP), y)
 
 
 func _update_player_label() -> void:

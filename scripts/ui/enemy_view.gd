@@ -1,6 +1,8 @@
 class_name EnemyView extends PanelContainer
 
-signal clicked(enemy_view: EnemyView)
+# Mouse filter is PASS — clicks fall through to the dragging CardView's _input.
+# (Hit-test for drop-on-enemy happens in BattleScene via get_global_rect.)
+
 
 const VIEW_W: int = 200
 const VIEW_H: int = 260
@@ -18,7 +20,7 @@ var _style: StyleBoxFlat
 func setup(p_enemy: Enemy) -> void:
 	enemy = p_enemy
 	custom_minimum_size = Vector2(VIEW_W, VIEW_H)
-	mouse_filter = Control.MOUSE_FILTER_STOP
+	mouse_filter = Control.MOUSE_FILTER_PASS
 	_build()
 	refresh()
 
@@ -36,28 +38,32 @@ func _build() -> void:
 	add_theme_stylebox_override("panel", _style)
 
 	var vb := VBoxContainer.new()
+	vb.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	vb.add_theme_constant_override("separation", 6)
 	add_child(vb)
 
 	_name_label = Label.new()
+	_name_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_name_label.add_theme_font_size_override("font_size", 16)
 	vb.add_child(_name_label)
 
 	_intent_label = Label.new()
+	_intent_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_intent_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_intent_label.add_theme_font_size_override("font_size", 18)
 	_intent_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.40))
 	vb.add_child(_intent_label)
 
-	# Placeholder sprite area
 	var sprite_box := PanelContainer.new()
+	sprite_box.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	sprite_box.custom_minimum_size = Vector2(0, 90)
 	var sbs := StyleBoxFlat.new()
 	sbs.bg_color = Color(0.20, 0.14, 0.14)
 	sbs.set_corner_radius_all(4)
 	sprite_box.add_theme_stylebox_override("panel", sbs)
 	var sprite_label := Label.new()
+	sprite_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	sprite_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	sprite_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	sprite_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -68,17 +74,21 @@ func _build() -> void:
 	vb.add_child(sprite_box)
 
 	var hpbox := HBoxContainer.new()
+	hpbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_hp_label = Label.new()
+	_hp_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_hp_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_hp_label.add_theme_font_size_override("font_size", 14)
 	hpbox.add_child(_hp_label)
 	_block_label = Label.new()
+	_block_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_block_label.add_theme_color_override("font_color", Color(0.5, 0.8, 1.0))
 	_block_label.add_theme_font_size_override("font_size", 14)
 	hpbox.add_child(_block_label)
 	vb.add_child(hpbox)
 
 	_status_label = Label.new()
+	_status_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_status_label.add_theme_font_size_override("font_size", 12)
 	_status_label.add_theme_color_override("font_color", Color(1.0, 0.6, 0.6))
@@ -124,12 +134,3 @@ func _status_text() -> String:
 	for id in enemy.status_holder.stacks.keys():
 		parts.append("%s:%d" % [str(id), enemy.status_holder.stacks[id]])
 	return ", ".join(parts)
-
-
-func _gui_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton:
-		var mb := event as InputEventMouseButton
-		if mb.pressed and mb.button_index == MOUSE_BUTTON_LEFT:
-			if not enemy.is_dead():
-				clicked.emit(self)
-				accept_event()
