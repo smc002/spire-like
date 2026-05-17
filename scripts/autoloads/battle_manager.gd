@@ -232,7 +232,33 @@ func _check_battle_end() -> void:
 		return
 	if player.is_dead():
 		battle_active = false
+		_cleanup_battle()
 		BattleEvents.battle_lost.emit()
 	elif living_enemies().is_empty():
 		battle_active = false
+		_cleanup_battle()
 		BattleEvents.battle_won.emit()
+
+
+# External force-end for safety nets (e.g. AutoBattler turn cap)
+func force_end_battle(won: bool) -> void:
+	if not battle_active:
+		return
+	battle_active = false
+	_cleanup_battle()
+	if won:
+		BattleEvents.battle_won.emit()
+	else:
+		BattleEvents.battle_lost.emit()
+
+
+# Wipe per-battle state so the player/enemies can be discarded cleanly and
+# the next battle starts fresh (no stale status behaviors on player).
+func _cleanup_battle() -> void:
+	if player and player.status_holder:
+		player.status_holder.clear_all()
+		player.block = 0
+	for e in enemies:
+		if is_instance_valid(e):
+			if e.status_holder:
+				e.status_holder.clear_all()

@@ -11,9 +11,11 @@ var max_energy: int = 3
 var draw_count: int = 5
 
 
-# Called once per run (not per battle)
-func setup_run(p_max_hp: int, p_deck: Array[Card]) -> void:
+# Called once per battle. max_hp / current_hp / deck come from RunState
+# so HP carries between battles within a run.
+func setup_run(p_max_hp: int, p_current_hp: int, p_deck: Array[Card]) -> void:
 	setup(p_max_hp)
+	hp = clamp(p_current_hp, 0, max_hp)
 	deck.clear()
 	for c in p_deck:
 		deck.append(c.duplicate(true) as Card)

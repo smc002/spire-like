@@ -45,3 +45,13 @@ func _remove(id: StringName) -> void:
 		behaviors[id].queue_free()
 		behaviors.erase(id)
 	stacks.erase(id)
+
+
+# Called at end of battle to wipe everything immediately, so a new battle
+# starts with a clean slate even when the actor is reused.
+func clear_all() -> void:
+	for id in stacks.keys().duplicate():
+		if behaviors.has(id):
+			behaviors[id].free()   # immediate, no signal leakage
+			behaviors.erase(id)
+	stacks.clear()
