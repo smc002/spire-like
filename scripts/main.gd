@@ -1,7 +1,7 @@
 extends Node2D
 
-# Entry point. Set USE_AUTO_PLAY=true to run the headless multi-battle
-# test driver instead of the human-playable UI.
+# Entry point. Switches to main menu on boot. Flip USE_AUTO_PLAY to run
+# the headless multi-battle test driver instead.
 
 const USE_AUTO_PLAY: bool = false
 
@@ -11,11 +11,11 @@ func _ready() -> void:
 	if USE_AUTO_PLAY:
 		_start_auto_play()
 	else:
-		call_deferred("_switch_to_battle_ui")
+		call_deferred("_switch_to_main_menu")
 
 
-func _switch_to_battle_ui() -> void:
-	get_tree().change_scene_to_file("res://scenes/battle_scene.tscn")
+func _switch_to_main_menu() -> void:
+	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 
 
 func _start_auto_play() -> void:

@@ -24,6 +24,7 @@ config/icon="res://icon.svg"
 BattleEvents="*res://scripts/autoloads/battle_events.gd"
 StatusRegistry="*res://scripts/autoloads/status_registry.gd"
 RunState="*res://scripts/autoloads/run_state.gd"
+SFX="*res://scripts/autoloads/sfx.gd"
 BattleManager="*res://scripts/autoloads/battle_manager.gd"
 
 [display]

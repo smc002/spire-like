@@ -3,24 +3,26 @@ extends Control
 # Human-playable battle UI with full feedback layer.
 #
 # Drag a playable card and release:
-#   • target card → release over an enemy to play; elsewhere cancels (tweens back)
-#   • no-target card → release above the hand row to play; otherwise cancels
+#   • target card → over an enemy plays; elsewhere cancels (tweens back)
+#   • no-target card → above hand plays; otherwise cancels
 #
-# Feedback this scene now provides:
-#   • Card hover (CardView), drop-zone hint, damage preview (CardView + EnemyView)
+# Feedback this scene provides:
+#   • Card hover (CardView), drop-zone hint, damage preview
 #   • Per-card draw / discard / exhaust / play animations
 #   • Floating damage / block / status numbers
-#   • Hit flash on damage targets
-#   • Battle end fade-in
-#   • Pile click → modal showing piles' card lists
-# Combat pacing comes from BattleManager (async enemy turn).
+#   • Hit flash + particle burst + screen shake on damage
+#   • Battle end fade-in then transition to run end screen
+#   • Pause overlay (Pause button), deck viewer (Deck button)
+#   • Vignette overlay for atmosphere
 
 
 # ─────────────────────────────────────────────────────────────────────
 # UI refs
 # ─────────────────────────────────────────────────────────────────────
 
+var _shake_root: Control        # Wraps everything that shakes
 var _bg: ColorRect
+var _vignette: TextureRect
 var _turn_label: Label
 var _action_log: Label
 var _enemy_container: HBoxContainer
@@ -40,17 +42,28 @@ var _discard_btn: Button
 var _exhaust_btn: Button
 
 var _end_turn_btn: Button
+var _deck_btn: Button
+var _pause_btn: Button
 
-var _fx_layer: Control          # floats, hit overlays — top of stack
+var _fx_layer: Control
 
 var _result_panel: PanelContainer
 var _result_label: Label
 var _result_button: Button
+var _result_menu_button: Button
+var _result_is_win: bool = false
 
-var _pile_modal: Panel          # popup for pile viewer
+var _pile_modal: Panel
 var _pile_modal_title: Label
 var _pile_modal_list: Label
 var _pile_modal_close: Button
+
+var _deck_modal: Panel
+var _deck_modal_title: Label
+var _deck_modal_grid: GridContainer
+var _deck_modal_close: Button
+
+var _pause_panel: Panel
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -67,6 +80,8 @@ const DRAW_PILE_POS: Vector2 = Vector2(1095, 568)
 const DISCARD_PILE_POS: Vector2 = Vector2(1095, 605)
 const EXHAUST_PILE_POS: Vector2 = Vector2(1095, 642)
 
+const BIG_HIT_THRESHOLD: int = 8
+
 
 # ─────────────────────────────────────────────────────────────────────
 # State
@@ -76,9 +91,6 @@ var _player: Player
 var _enemy_views: Array[EnemyView] = []
 var _connections: Array = []
 var _dragging_card: CardView = null
-
-# Card -> CardView, only for cards currently in hand. Views being animated
-# away (discard/exhaust/play) are tracked in _flying_views instead.
 var _card_views: Dictionary = {}
 var _flying_views: Array = []
 
@@ -88,6 +100,7 @@ func _ready() -> void:
 		size = Vector2(1280, 720)
 	_build_ui()
 	_wire_events()
+	SFX.play_bgm(&"battle")
 	_start_new_run_battle()
 
 
@@ -96,6 +109,7 @@ func _exit_tree() -> void:
 		if pair[0].is_connected(pair[1]):
 			pair[0].disconnect(pair[1])
 	_connections.clear()
+	get_tree().paused = false
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -103,28 +117,54 @@ func _exit_tree() -> void:
 # ─────────────────────────────────────────────────────────────────────
 
 func _build_ui() -> void:
+	_shake_root = Control.new()
+	_shake_root.anchor_right = 1
+	_shake_root.anchor_bottom = 1
+	_shake_root.mouse_filter = Control.MOUSE_FILTER_PASS
+	add_child(_shake_root)
+
 	_bg = ColorRect.new()
 	_bg.color = Color(0.06, 0.06, 0.10)
 	_bg.anchor_right = 1
 	_bg.anchor_bottom = 1
 	_bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(_bg)
+	_shake_root.add_child(_bg)
+
+	_vignette = _make_vignette()
+	_shake_root.add_child(_vignette)
 
 	_turn_label = Label.new()
 	_turn_label.position = Vector2(20, 12)
 	_turn_label.add_theme_font_size_override("font_size", 22)
 	_turn_label.text = "—"
 	_turn_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(_turn_label)
+	_shake_root.add_child(_turn_label)
 
 	_action_log = Label.new()
-	_action_log.position = Vector2(750, 18)
-	_action_log.size = Vector2(510, 30)
+	_action_log.position = Vector2(550, 18)
+	_action_log.size = Vector2(550, 30)
 	_action_log.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	_action_log.add_theme_font_size_override("font_size", 14)
 	_action_log.add_theme_color_override("font_color", Color(0.75, 0.75, 0.85))
 	_action_log.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(_action_log)
+	_shake_root.add_child(_action_log)
+
+	# Top right buttons: Deck + Pause
+	_deck_btn = Button.new()
+	_deck_btn.text = "Deck"
+	_deck_btn.position = Vector2(1110, 12)
+	_deck_btn.size = Vector2(70, 32)
+	_deck_btn.add_theme_font_size_override("font_size", 13)
+	_deck_btn.pressed.connect(_on_deck_pressed)
+	_shake_root.add_child(_deck_btn)
+
+	_pause_btn = Button.new()
+	_pause_btn.text = "II"
+	_pause_btn.position = Vector2(1190, 12)
+	_pause_btn.size = Vector2(70, 32)
+	_pause_btn.add_theme_font_size_override("font_size", 13)
+	_pause_btn.pressed.connect(_on_pause_pressed)
+	_shake_root.add_child(_pause_btn)
 
 	_enemy_container = HBoxContainer.new()
 	_enemy_container.position = Vector2(0, 60)
@@ -132,32 +172,30 @@ func _build_ui() -> void:
 	_enemy_container.alignment = BoxContainer.ALIGNMENT_CENTER
 	_enemy_container.add_theme_constant_override("separation", 40)
 	_enemy_container.mouse_filter = Control.MOUSE_FILTER_PASS
-	add_child(_enemy_container)
+	_shake_root.add_child(_enemy_container)
 
 	_build_player_panel()
 
-	# Drop-zone hint banner
 	_drop_zone_hint = ColorRect.new()
 	_drop_zone_hint.position = Vector2(HAND_AREA_X, HAND_AREA_Y - 40)
 	_drop_zone_hint.size = Vector2(HAND_AREA_W, 40)
 	_drop_zone_hint.color = Color(0.6, 0.85, 0.4, 0.20)
 	_drop_zone_hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_drop_zone_hint.visible = false
-	add_child(_drop_zone_hint)
+	_shake_root.add_child(_drop_zone_hint)
 
 	_hand_root = Control.new()
 	_hand_root.position = Vector2(HAND_AREA_X, HAND_AREA_Y)
 	_hand_root.size = Vector2(HAND_AREA_W, HAND_AREA_H)
 	_hand_root.mouse_filter = Control.MOUSE_FILTER_PASS
-	add_child(_hand_root)
+	_shake_root.add_child(_hand_root)
 
-	# Pile buttons (right side)
 	_draw_btn = _make_pile_button("Draw: 0", DRAW_PILE_POS, _on_draw_pile_clicked)
-	add_child(_draw_btn)
+	_shake_root.add_child(_draw_btn)
 	_discard_btn = _make_pile_button("Discard: 0", DISCARD_PILE_POS, _on_discard_pile_clicked)
-	add_child(_discard_btn)
+	_shake_root.add_child(_discard_btn)
 	_exhaust_btn = _make_pile_button("Exhaust: 0", EXHAUST_PILE_POS, _on_exhaust_pile_clicked)
-	add_child(_exhaust_btn)
+	_shake_root.add_child(_exhaust_btn)
 
 	_end_turn_btn = Button.new()
 	_end_turn_btn.text = "End Turn"
@@ -165,17 +203,18 @@ func _build_ui() -> void:
 	_end_turn_btn.size = Vector2(200, 32)
 	_end_turn_btn.add_theme_font_size_override("font_size", 16)
 	_end_turn_btn.pressed.connect(_on_end_turn_pressed)
-	add_child(_end_turn_btn)
+	_shake_root.add_child(_end_turn_btn)
 
-	# FX layer (always on top so floats / overlays don't get covered)
 	_fx_layer = Control.new()
 	_fx_layer.anchor_right = 1
 	_fx_layer.anchor_bottom = 1
 	_fx_layer.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(_fx_layer)
+	_shake_root.add_child(_fx_layer)
 
 	_build_result_panel()
 	_build_pile_modal()
+	_build_deck_modal()
+	_build_pause_panel()
 
 
 func _build_player_panel() -> void:
@@ -189,7 +228,7 @@ func _build_player_panel() -> void:
 	pstyle.set_border_width_all(1)
 	pstyle.border_color = Color(0.35, 0.45, 0.60)
 	_player_panel.add_theme_stylebox_override("panel", pstyle)
-	add_child(_player_panel)
+	_shake_root.add_child(_player_panel)
 
 	_player_name_label = Label.new()
 	_player_name_label.position = Vector2(12, 10)
@@ -234,10 +273,28 @@ func _make_pile_button(text: String, pos: Vector2, cb: Callable) -> Button:
 	return b
 
 
+func _make_vignette() -> TextureRect:
+	var tr := TextureRect.new()
+	var gt := GradientTexture2D.new()
+	var g := Gradient.new()
+	g.set_color(0, Color(0, 0, 0, 0))
+	g.set_color(1, Color(0, 0, 0, 0.55))
+	gt.gradient = g
+	gt.fill = GradientTexture2D.FILL_RADIAL
+	gt.fill_from = Vector2(0.5, 0.5)
+	gt.fill_to = Vector2(1.0, 1.0)
+	gt.width = 1280
+	gt.height = 720
+	tr.texture = gt
+	tr.size = Vector2(1280, 720)
+	tr.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return tr
+
+
 func _build_result_panel() -> void:
 	_result_panel = PanelContainer.new()
 	_result_panel.position = Vector2(440, 240)
-	_result_panel.size = Vector2(400, 240)
+	_result_panel.size = Vector2(400, 260)
 	var rstyle := StyleBoxFlat.new()
 	rstyle.bg_color = Color(0.10, 0.10, 0.18, 0.96)
 	rstyle.set_corner_radius_all(12)
@@ -249,20 +306,28 @@ func _build_result_panel() -> void:
 	rstyle.content_margin_bottom = 30
 	_result_panel.add_theme_stylebox_override("panel", rstyle)
 	var rvb := VBoxContainer.new()
-	rvb.add_theme_constant_override("separation", 24)
+	rvb.add_theme_constant_override("separation", 18)
 	_result_panel.add_child(rvb)
 	_result_label = Label.new()
 	_result_label.add_theme_font_size_override("font_size", 32)
 	_result_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	rvb.add_child(_result_label)
 	_result_button = Button.new()
-	_result_button.text = "Restart"
+	_result_button.text = "Continue"
 	_result_button.add_theme_font_size_override("font_size", 18)
-	_result_button.custom_minimum_size = Vector2(180, 50)
-	_result_button.pressed.connect(_on_result_button_pressed)
+	_result_button.custom_minimum_size = Vector2(200, 50)
+	_result_button.pressed.connect(_on_result_continue)
 	var btn_center := CenterContainer.new()
 	btn_center.add_child(_result_button)
 	rvb.add_child(btn_center)
+	_result_menu_button = Button.new()
+	_result_menu_button.text = "Main Menu"
+	_result_menu_button.add_theme_font_size_override("font_size", 14)
+	_result_menu_button.custom_minimum_size = Vector2(140, 36)
+	_result_menu_button.pressed.connect(_on_result_menu)
+	var btn_center2 := CenterContainer.new()
+	btn_center2.add_child(_result_menu_button)
+	rvb.add_child(btn_center2)
 	_result_panel.visible = false
 	add_child(_result_panel)
 
@@ -305,6 +370,97 @@ func _build_pile_modal() -> void:
 	add_child(_pile_modal)
 
 
+func _build_deck_modal() -> void:
+	_deck_modal = Panel.new()
+	_deck_modal.position = Vector2(90, 60)
+	_deck_modal.size = Vector2(1100, 600)
+	_deck_modal.mouse_filter = Control.MOUSE_FILTER_STOP
+	var mstyle := StyleBoxFlat.new()
+	mstyle.bg_color = Color(0.08, 0.08, 0.14, 0.98)
+	mstyle.set_corner_radius_all(10)
+	mstyle.set_border_width_all(2)
+	mstyle.border_color = Color(0.5, 0.5, 0.65)
+	_deck_modal.add_theme_stylebox_override("panel", mstyle)
+
+	_deck_modal_title = Label.new()
+	_deck_modal_title.position = Vector2(0, 14)
+	_deck_modal_title.size = Vector2(1100, 30)
+	_deck_modal_title.add_theme_font_size_override("font_size", 22)
+	_deck_modal_title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_deck_modal.add_child(_deck_modal_title)
+
+	_deck_modal_grid = GridContainer.new()
+	_deck_modal_grid.columns = 7
+	_deck_modal_grid.position = Vector2(20, 60)
+	_deck_modal_grid.size = Vector2(1060, 480)
+	_deck_modal_grid.add_theme_constant_override("h_separation", 12)
+	_deck_modal_grid.add_theme_constant_override("v_separation", 12)
+	_deck_modal_grid.mouse_filter = Control.MOUSE_FILTER_PASS
+	_deck_modal.add_child(_deck_modal_grid)
+
+	_deck_modal_close = Button.new()
+	_deck_modal_close.text = "Close"
+	_deck_modal_close.position = Vector2(500, 555)
+	_deck_modal_close.size = Vector2(100, 30)
+	_deck_modal_close.pressed.connect(_on_deck_modal_close)
+	_deck_modal.add_child(_deck_modal_close)
+
+	_deck_modal.visible = false
+	add_child(_deck_modal)
+
+
+func _build_pause_panel() -> void:
+	_pause_panel = Panel.new()
+	_pause_panel.position = Vector2(440, 220)
+	_pause_panel.size = Vector2(400, 280)
+	_pause_panel.process_mode = Node.PROCESS_MODE_ALWAYS
+	var ps := StyleBoxFlat.new()
+	ps.bg_color = Color(0.10, 0.10, 0.18, 0.97)
+	ps.set_corner_radius_all(12)
+	ps.set_border_width_all(2)
+	ps.border_color = Color(0.6, 0.6, 0.7)
+	_pause_panel.add_theme_stylebox_override("panel", ps)
+
+	var title := Label.new()
+	title.text = "Paused"
+	title.position = Vector2(0, 24)
+	title.size = Vector2(400, 40)
+	title.add_theme_font_size_override("font_size", 32)
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_pause_panel.add_child(title)
+
+	var resume := Button.new()
+	resume.text = "Resume"
+	resume.position = Vector2(100, 90)
+	resume.size = Vector2(200, 44)
+	resume.add_theme_font_size_override("font_size", 16)
+	resume.process_mode = Node.PROCESS_MODE_ALWAYS
+	resume.pressed.connect(_on_resume_pressed)
+	_pause_panel.add_child(resume)
+
+	var menu := Button.new()
+	menu.text = "Quit to Main Menu"
+	menu.position = Vector2(100, 150)
+	menu.size = Vector2(200, 44)
+	menu.add_theme_font_size_override("font_size", 16)
+	menu.process_mode = Node.PROCESS_MODE_ALWAYS
+	menu.pressed.connect(_on_pause_quit_pressed)
+	_pause_panel.add_child(menu)
+
+	var hint := Label.new()
+	hint.text = "Game paused — battle resumes when you click Resume."
+	hint.position = Vector2(20, 220)
+	hint.size = Vector2(360, 40)
+	hint.add_theme_font_size_override("font_size", 12)
+	hint.add_theme_color_override("font_color", Color(0.6, 0.6, 0.7))
+	hint.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_pause_panel.add_child(hint)
+
+	_pause_panel.visible = false
+	add_child(_pause_panel)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Events
 # ─────────────────────────────────────────────────────────────────────
@@ -322,6 +478,7 @@ func _wire_events() -> void:
 	_connect(BattleEvents.block_gained, _on_block_gained)
 	_connect(BattleEvents.status_applied, _on_status_applied)
 	_connect(BattleEvents.enemy_intent_changed, _on_enemy_intent_changed)
+	_connect(BattleEvents.actor_died, _on_actor_died)
 
 
 func _connect(sig: Signal, cb: Callable) -> void:
@@ -334,7 +491,8 @@ func _connect(sig: Signal, cb: Callable) -> void:
 # ─────────────────────────────────────────────────────────────────────
 
 func _start_new_run_battle() -> void:
-	RunState.start_new_run(&"warrior")
+	if not RunState.run_active:
+		RunState.start_new_run(&"warrior")
 	RunState.current_floor = 1
 	_start_battle(_floor1_encounter())
 
@@ -378,11 +536,14 @@ func _on_battle_started() -> void:
 func _on_battle_won() -> void:
 	if BattleManager.player:
 		RunState.hp = BattleManager.player.hp
-	_show_result("Victory!", "Restart Run", Color(0.65, 1.0, 0.7))
+	_result_is_win = true
+	_show_result("Victory!", Color(0.65, 1.0, 0.7))
 
 
 func _on_battle_lost() -> void:
-	_show_result("Defeated", "Restart Run", Color(1.0, 0.45, 0.45))
+	_result_is_win = false
+	_show_result("Defeated", Color(1.0, 0.45, 0.45))
+	_red_flash()
 
 
 func _on_turn_started(actor: Actor) -> void:
@@ -396,7 +557,6 @@ func _on_turn_started(actor: Actor) -> void:
 
 
 func _on_card_drawn(card: Card) -> void:
-	# Spawn a CardView for the new card, animate from draw pile to its slot.
 	if _card_views.has(card):
 		return
 	var cv := CardView.new()
@@ -405,10 +565,7 @@ func _on_card_drawn(card: Card) -> void:
 	cv.drag_started.connect(_on_card_drag_started)
 	cv.drag_released.connect(_on_card_drag_released)
 	_card_views[card] = cv
-
-	# Start position in _hand_root-local coords (draw pile is in scene-local)
 	var start := _to_hand_local(DRAW_PILE_POS)
-	# Slot will be computed after layout.
 	cv.slide_in_from(start, start)
 	_layout_hand(false)
 	_refresh_card_playability()
@@ -440,10 +597,17 @@ func _on_damage_dealt(_src: Actor, tgt: Actor, actual: int, blocked: int) -> voi
 	var pos := _actor_center(tgt)
 	if actual > 0:
 		FloatingNumber.spawn(_fx_layer, "-%d" % actual, Color(1.0, 0.35, 0.35), pos)
+		ParticleBurst.spawn_hit(_fx_layer, pos)
+		_flash_actor(tgt)
+		if actual >= BIG_HIT_THRESHOLD:
+			ScreenShake.shake(_shake_root, 7.0, 0.22)
+		else:
+			ScreenShake.shake(_shake_root, 3.0, 0.14)
 	if blocked > 0:
 		FloatingNumber.spawn(_fx_layer, "%d" % blocked, Color(0.6, 0.85, 1.0),
 				pos + Vector2(35, 14))
-	_flash_actor(tgt)
+		if actual == 0:
+			ParticleBurst.spawn_block(_fx_layer, pos)
 	_refresh_static()
 
 
@@ -453,21 +617,28 @@ func _on_block_gained(tgt: Actor, amount: int) -> void:
 	_set_log("%s +%d block" % [_name_of(tgt), amount])
 	FloatingNumber.spawn(_fx_layer, "+%d Blk" % amount, Color(0.55, 0.85, 1.0),
 			_actor_center(tgt))
+	ParticleBurst.spawn_block(_fx_layer, _actor_center(tgt))
 	_refresh_static()
 
 
 func _on_status_applied(tgt: Actor, id: StringName, total: int) -> void:
 	_set_log("%s: %s -> %d" % [_name_of(tgt), str(id), total])
 	var data := StatusRegistry.get_status(id)
-	var color := Color(0.85, 0.55, 0.95) if (data and data.is_debuff) \
-			else Color(0.55, 0.95, 0.65)
+	var debuff := data != null and data.is_debuff
+	var color := Color(0.85, 0.55, 0.95) if debuff else Color(0.55, 0.95, 0.65)
 	FloatingNumber.spawn(_fx_layer, "%s %d" % [str(id), total], color,
 			_actor_center(tgt) + Vector2(0, -22))
+	if not debuff:
+		ParticleBurst.spawn_buff(_fx_layer, _actor_center(tgt))
 	_refresh_static()
 
 
 func _on_enemy_intent_changed(_enemy: Enemy, _move: EnemyMove) -> void:
 	_refresh_enemies()
+
+
+func _on_actor_died(actor: Actor) -> void:
+	ParticleBurst.spawn_death(_fx_layer, _actor_center(actor))
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -520,7 +691,6 @@ func _on_card_drag_released(cv: CardView, release_global_pos: Vector2) -> void:
 
 	if not played:
 		cv.cancel_drag()
-	# If played, _on_card_discarded / _on_card_exhausted will fly it away.
 
 
 func _process(_delta: float) -> void:
@@ -529,10 +699,8 @@ func _process(_delta: float) -> void:
 	var card := _dragging_card.card
 	if not _card_deals_damage(card):
 		return
-
 	var mouse_pos := get_global_mouse_position()
 	var hits_all := _card_hits_all(card)
-
 	var hovered: EnemyView = null
 	if card.requires_target():
 		for ev in _enemy_views:
@@ -541,7 +709,6 @@ func _process(_delta: float) -> void:
 			if ev.get_global_rect().has_point(mouse_pos):
 				hovered = ev
 				break
-
 	for ev in _enemy_views:
 		if not is_instance_valid(ev) or ev.enemy == null or ev.enemy.is_dead():
 			continue
@@ -605,14 +772,11 @@ func _fly_card_to_pile(card: Card, pile_world: Vector2, tint: Color) -> void:
 	if not is_instance_valid(cv):
 		return
 	_flying_views.append(cv)
-
-	# Move under the fx layer so the card flies on top of everything.
 	var current_global := cv.global_position
 	cv.get_parent().remove_child(cv)
 	_fx_layer.add_child(cv)
 	cv.global_position = current_global
 	cv.mouse_filter = Control.MOUSE_FILTER_IGNORE
-
 	var target_local := pile_world - Vector2(CardView.CARD_W / 2.0,
 			CardView.CARD_H / 2.0)
 	var t := cv.create_tween().set_parallel(true)
@@ -673,7 +837,7 @@ func _refresh_card_playability() -> void:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Static UI (player panel, piles, enemy refresh, turn label)
+# Static UI
 # ─────────────────────────────────────────────────────────────────────
 
 func _refresh_static() -> void:
@@ -742,7 +906,7 @@ func _set_log(msg: String) -> void:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Hit flash
+# Hit feedback
 # ─────────────────────────────────────────────────────────────────────
 
 func _flash_actor(actor: Actor) -> void:
@@ -757,20 +921,38 @@ func _flash_actor(actor: Actor) -> void:
 		t.tween_property(_player_panel, "modulate", Color.WHITE, 0.30)
 
 
+func _red_flash() -> void:
+	var overlay := ColorRect.new()
+	overlay.color = Color(0.8, 0.2, 0.2, 0.0)
+	overlay.size = Vector2(1280, 720)
+	overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_fx_layer.add_child(overlay)
+	var t := overlay.create_tween()
+	t.tween_property(overlay, "color:a", 0.4, 0.10)
+	t.tween_property(overlay, "color:a", 0.0, 0.30)
+	t.tween_callback(overlay.queue_free)
+
+
 # ─────────────────────────────────────────────────────────────────────
-# Pile viewer modal
+# Pile / deck / pause modals
 # ─────────────────────────────────────────────────────────────────────
 
 func _on_draw_pile_clicked() -> void:
-	_show_pile_modal("Draw Pile (shuffled)", BattleManager.player.draw_pile if BattleManager.player else [])
+	SFX.play(&"ui_click")
+	_show_pile_modal("Draw Pile (shuffled)",
+			BattleManager.player.draw_pile if BattleManager.player else [])
 
 
 func _on_discard_pile_clicked() -> void:
-	_show_pile_modal("Discard Pile", BattleManager.player.discard_pile if BattleManager.player else [])
+	SFX.play(&"ui_click")
+	_show_pile_modal("Discard Pile",
+			BattleManager.player.discard_pile if BattleManager.player else [])
 
 
 func _on_exhaust_pile_clicked() -> void:
-	_show_pile_modal("Exhaust Pile", BattleManager.player.exhaust_pile if BattleManager.player else [])
+	SFX.play(&"ui_click")
+	_show_pile_modal("Exhaust Pile",
+			BattleManager.player.exhaust_pile if BattleManager.player else [])
 
 
 func _show_pile_modal(title: String, cards: Array) -> void:
@@ -789,21 +971,113 @@ func _show_pile_modal(title: String, cards: Array) -> void:
 
 
 func _on_pile_modal_close() -> void:
+	SFX.play(&"ui_click")
 	_pile_modal.visible = false
+
+
+func _on_deck_pressed() -> void:
+	SFX.play(&"ui_click")
+	_deck_modal_title.text = "Your Deck (%d cards)" % RunState.deck.size()
+	for c in _deck_modal_grid.get_children():
+		c.queue_free()
+	for card in RunState.deck:
+		_deck_modal_grid.add_child(_mini_card(card))
+	_deck_modal.visible = true
+
+
+func _on_deck_modal_close() -> void:
+	SFX.play(&"ui_click")
+	_deck_modal.visible = false
+
+
+func _mini_card(card: Card) -> Panel:
+	var p := Panel.new()
+	p.custom_minimum_size = Vector2(140, 100)
+	p.size = Vector2(140, 100)
+	p.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var s := StyleBoxFlat.new()
+	s.set_corner_radius_all(6)
+	s.set_border_width_all(1)
+	s.bg_color = _bg_for_card_type(card.type)
+	s.border_color = Color(0.18, 0.14, 0.08)
+	p.add_theme_stylebox_override("panel", s)
+
+	var cost := Label.new()
+	cost.text = "X" if card.cost == -1 else str(card.cost)
+	cost.position = Vector2(8, 4)
+	cost.size = Vector2(20, 22)
+	cost.add_theme_font_size_override("font_size", 16)
+	cost.add_theme_color_override("font_color", Color(1.0, 0.92, 0.35))
+	cost.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	p.add_child(cost)
+
+	var name_l := Label.new()
+	name_l.text = card.display_name
+	name_l.position = Vector2(32, 4)
+	name_l.size = Vector2(102, 22)
+	name_l.add_theme_font_size_override("font_size", 12)
+	name_l.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	name_l.clip_text = true
+	name_l.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	p.add_child(name_l)
+
+	var desc := Label.new()
+	desc.text = card.description
+	desc.position = Vector2(6, 30)
+	desc.size = Vector2(128, 66)
+	desc.add_theme_font_size_override("font_size", 10)
+	desc.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	desc.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	desc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	p.add_child(desc)
+	return p
+
+
+func _bg_for_card_type(t: int) -> Color:
+	match t:
+		Card.Type.ATTACK: return Color(0.55, 0.18, 0.18)
+		Card.Type.SKILL: return Color(0.17, 0.32, 0.48)
+		Card.Type.POWER: return Color(0.42, 0.22, 0.50)
+		Card.Type.CURSE: return Color(0.18, 0.10, 0.18)
+		_: return Color(0.30, 0.30, 0.30)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Pause
+# ─────────────────────────────────────────────────────────────────────
+
+func _on_pause_pressed() -> void:
+	SFX.play(&"ui_click")
+	get_tree().paused = true
+	_pause_panel.visible = true
+
+
+func _on_resume_pressed() -> void:
+	SFX.play(&"ui_click")
+	get_tree().paused = false
+	_pause_panel.visible = false
+
+
+func _on_pause_quit_pressed() -> void:
+	SFX.play(&"ui_click")
+	get_tree().paused = false
+	_pause_panel.visible = false
+	RunState.end_run()
+	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 
 
 # ─────────────────────────────────────────────────────────────────────
 # Result panel
 # ─────────────────────────────────────────────────────────────────────
 
-func _show_result(text: String, btn_text: String, color: Color) -> void:
+func _show_result(text: String, color: Color) -> void:
 	_result_label.text = text
 	_result_label.add_theme_color_override("font_color", color)
-	_result_button.text = btn_text
+	_result_button.text = "Continue" if _result_is_win else "View Stats"
 	_result_panel.visible = true
 	_result_panel.modulate.a = 0.0
 	var t := create_tween()
-	t.tween_property(_result_panel, "modulate:a", 1.0, 0.4)
+	t.tween_property(_result_panel, "modulate:a", 1.0, 0.5)
 	_end_turn_btn.disabled = true
 
 
@@ -812,13 +1086,20 @@ func _on_end_turn_pressed() -> void:
 		return
 	if _dragging_card != null:
 		return
+	SFX.play(&"end_turn")
 	_end_turn_btn.disabled = true
 	BattleManager.end_player_turn()
 
 
-func _on_result_button_pressed() -> void:
-	_result_panel.visible = false
-	_start_new_run_battle()
+func _on_result_continue() -> void:
+	SFX.play(&"ui_click")
+	get_tree().change_scene_to_file("res://scenes/run_end_screen.tscn")
+
+
+func _on_result_menu() -> void:
+	SFX.play(&"ui_click")
+	RunState.end_run()
+	get_tree().change_scene_to_file("res://scenes/main_menu.tscn")
 
 
 # ─────────────────────────────────────────────────────────────────────
